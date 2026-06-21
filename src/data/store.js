@@ -2,6 +2,7 @@
 
 const { getPool } = require('../db');
 const { hashPassword } = require('../utils/password');
+const { buildTimeBucketExpr } = require('./aggregator');
 
 /** 数据仓储层：SQL 集中此处，路由层只调用这些 async 方法，对外返回 camelCase。 */
 
@@ -21,11 +22,51 @@ function mapElder(r) {
 }
 function mapMeal(r) {
   if (!r) return null;
-  return { id: r.id, canteenId: r.canteen_id, serveDate: r.serve_date, mealType: r.meal_type, dishName: r.dish_name, priceCents: r.price_cents, status: r.status, createdAt: r.created_at, updatedAt: r.updated_at };
+  return {
+    id: r.id,
+    canteenId: r.canteen_id,
+    serveDate: r.serve_date,
+    mealType: r.meal_type,
+    dishName: r.dish_name,
+    priceCents: r.price_cents,
+    calories: r.calories,
+    proteinG: r.protein_g,
+    carbsG: r.carbs_g,
+    fatG: r.fat_g,
+    status: r.status,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
 }
 function mapOrder(r) {
   if (!r) return null;
   return { id: r.id, elderId: r.elder_id, mealId: r.meal_id, diningType: r.dining_type, qty: r.qty, amountCents: r.amount_cents, subsidyCents: r.subsidy_cents, payCents: r.pay_cents, status: r.status, createdAt: r.created_at, updatedAt: r.updated_at };
+}
+function mapExportTask(r) {
+  if (!r) return null;
+  let params = null;
+  if (r.params !== null && r.params !== undefined) {
+    if (typeof r.params === 'string') {
+      try { params = JSON.parse(r.params); } catch (_) { params = null; }
+    } else {
+      params = r.params;
+    }
+  }
+  return {
+    id: r.id,
+    taskKey: r.task_key,
+    type: r.type,
+    params,
+    status: r.status,
+    totalCount: r.total_count,
+    processedCount: r.processed_count,
+    filePath: r.file_path,
+    fileName: r.file_name,
+    errorMessage: r.error_message,
+    createdBy: r.created_by,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
 }
 
 /* ----------------------------- 用户 ----------------------------- */
@@ -107,12 +148,18 @@ async function listMeals({ canteenId, serveDate, mealType, status } = {}) {
 }
 async function getMealById(id) { const [r] = await getPool().query('SELECT * FROM meals WHERE id=?', [id]); return mapMeal(r[0]); }
 async function createMeal(d) {
-  const [x] = await getPool().query('INSERT INTO meals (canteen_id,serve_date,meal_type,dish_name,price_cents,status) VALUES (?,?,?,?,?,?)',
-    [d.canteenId, d.serveDate, d.mealType || 'LUNCH', d.dishName, d.priceCents || 0, d.status || 'PUBLISHED']);
+  const [x] = await getPool().query(
+    'INSERT INTO meals (canteen_id,serve_date,meal_type,dish_name,price_cents,calories,protein_g,carbs_g,fat_g,status) VALUES (?,?,?,?,?,?,?,?,?,?)',
+    [d.canteenId, d.serveDate, d.mealType || 'LUNCH', d.dishName, d.priceCents || 0,
+     d.calories || 0, d.proteinG || 0, d.carbsG || 0, d.fatG || 0, d.status || 'PUBLISHED']);
   return getMealById(x.insertId);
 }
 async function updateMeal(id, d) {
-  const map = { serveDate: 'serve_date', mealType: 'meal_type', dishName: 'dish_name', priceCents: 'price_cents', status: 'status' };
+  const map = {
+    serveDate: 'serve_date', mealType: 'meal_type', dishName: 'dish_name',
+    priceCents: 'price_cents', calories: 'calories', proteinG: 'protein_g',
+    carbsG: 'carbs_g', fatG: 'fat_g', status: 'status'
+  };
   const sets = []; const p = [];
   for (const [k, col] of Object.entries(map)) if (d[k] !== undefined) { sets.push(`${col}=?`); p.push(d[k]); }
   if (sets.length) { sets.push('updated_at=CURRENT_TIMESTAMP(3)'); p.push(id); await getPool().query(`UPDATE meals SET ${sets.join(',')} WHERE id=?`, p); }
@@ -143,11 +190,474 @@ async function updateOrder(id, d) {
   return getOrderById(id);
 }
 
+/* ----------------------------- 导出任务 ----------------------------- */
+async function getExportTaskById(id) { const [r] = await getPool().query('SELECT * FROM export_tasks WHERE id=?', [id]); return mapExportTask(r[0]); }
+async function getExportTaskByKey(taskKey) { const [r] = await getPool().query('SELECT * FROM export_tasks WHERE task_key=?', [taskKey]); return mapExportTask(r[0]); }
+async function listExportTasks({ type, status } = {}) {
+  const w = []; const p = [];
+  if (type) { w.push('type=?'); p.push(type); }
+  if (status) { w.push('status=?'); p.push(status); }
+  const c = w.length ? `WHERE ${w.join(' AND ')}` : '';
+  const [r] = await getPool().query(`SELECT * FROM export_tasks ${c} ORDER BY id DESC LIMIT 100`, p);
+  return r.map(mapExportTask);
+}
+async function createExportTask(d) {
+  const paramsJson = d.params ? JSON.stringify(d.params) : null;
+  const [x] = await getPool().query(
+    'INSERT INTO export_tasks (task_key, type, params, status, total_count, processed_count, file_name, created_by) VALUES (?,?,?,?,?,?,?,?)',
+    [d.taskKey, d.type, paramsJson, d.status || 'PENDING', d.totalCount || 0, d.processedCount || 0, d.fileName || null, d.createdBy ?? null]
+  );
+  return getExportTaskById(x.insertId);
+}
+async function updateExportTask(id, d) {
+  const map = { status: 'status', totalCount: 'total_count', processedCount: 'processed_count', filePath: 'file_path', fileName: 'file_name', errorMessage: 'error_message' };
+  const sets = []; const p = [];
+  for (const [k, col] of Object.entries(map)) if (d[k] !== undefined) { sets.push(`${col}=?`); p.push(d[k]); }
+  if (sets.length) { sets.push('updated_at=CURRENT_TIMESTAMP(3)'); p.push(id); await getPool().query(`UPDATE export_tasks SET ${sets.join(',')} WHERE id=?`, p); }
+  return getExportTaskById(id);
+}
+async function upsertExportTask(taskKey, d) {
+  const existing = await getExportTaskByKey(taskKey);
+  if (existing) return existing;
+  return createExportTask({ ...d, taskKey });
+}
+
+/* ----------------------------- 聚合查询：一次查出，无 N+1 ----------------------------- */
+
+async function getTodayDinerCountByCanteen(date) {
+  const sql = `
+    SELECT m.canteen_id,
+           SUM(o.qty) AS diner_count,
+           COUNT(DISTINCT o.elder_id) AS unique_elders
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    WHERE m.serve_date = ? AND o.status IN ('RESERVED','SERVED')
+    GROUP BY m.canteen_id
+  `;
+  const [r] = await getPool().query(sql, [date]);
+  return r;
+}
+
+async function getMealTypeDistribution(date) {
+  const sql = `
+    SELECT m.meal_type, SUM(o.qty) AS count
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    WHERE m.serve_date = ? AND o.status IN ('RESERVED','SERVED')
+    GROUP BY m.meal_type
+  `;
+  const [r] = await getPool().query(sql, [date]);
+  return r;
+}
+
+async function getSubsidyByLevel(dateStart, dateEnd) {
+  const sql = `
+    SELECT e.subsidy_level, SUM(o.subsidy_cents) AS amount
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    INNER JOIN elders e ON o.elder_id = e.id
+    WHERE m.serve_date BETWEEN ? AND ? AND o.status IN ('RESERVED','SERVED')
+    GROUP BY e.subsidy_level
+  `;
+  const [r] = await getPool().query(sql, [dateStart, dateEnd]);
+  return r;
+}
+
+async function getSubsidyByIdentity(dateStart, dateEnd) {
+  const sql = `
+    SELECT
+      CASE
+        WHEN e.subsidy_level = 'A' THEN 'LOW_INCOME'
+        WHEN e.age >= 80 THEN 'EMPTY_NEST'
+        ELSE 'GENERAL'
+      END AS identity_category,
+      SUM(o.subsidy_cents) AS amount
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    INNER JOIN elders e ON o.elder_id = e.id
+    WHERE m.serve_date BETWEEN ? AND ? AND o.status IN ('RESERVED','SERVED')
+    GROUP BY identity_category
+  `;
+  const [r] = await getPool().query(sql, [dateStart, dateEnd]);
+  return r;
+}
+
+async function getSelfPayTotal(date) {
+  const sql = `
+    SELECT SUM(o.pay_cents) AS amount
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    WHERE m.serve_date = ? AND o.status IN ('RESERVED','SERVED')
+  `;
+  const [r] = await getPool().query(sql, [date]);
+  return r;
+}
+
+async function getDiningTypeRatio(date) {
+  const sql = `
+    SELECT o.dining_type, SUM(o.qty) AS count
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    WHERE m.serve_date = ? AND o.status IN ('RESERVED','SERVED')
+    GROUP BY o.dining_type
+  `;
+  const [r] = await getPool().query(sql, [date]);
+  return r;
+}
+
+async function getNutritionCompliance(date) {
+  const sql = `
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN m.calories >= 400 AND m.protein_g >= 15 AND m.fat_g <= 30 THEN 1 ELSE 0 END) AS compliant
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    WHERE m.serve_date = ? AND o.status IN ('RESERVED','SERVED')
+  `;
+  const [r] = await getPool().query(sql, [date]);
+  return r;
+}
+
+async function getNoShowStats(date) {
+  const sql = `
+    SELECT o.status, SUM(o.qty) AS count
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    WHERE m.serve_date = ? AND o.status IN ('RESERVED','SERVED','NO_SHOW')
+    GROUP BY o.status
+  `;
+  const [r] = await getPool().query(sql, [date]);
+  return r;
+}
+
+async function getHeatmapData(date) {
+  const sql = `
+    SELECT
+      m.canteen_id,
+      HOUR(o.created_at) AS hour,
+      FLOOR(MINUTE(o.created_at) / 30) * 30 AS minute,
+      SUM(o.qty) AS count
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    WHERE m.serve_date = ? AND o.status IN ('RESERVED','SERVED')
+    GROUP BY m.canteen_id, hour, minute
+  `;
+  const [r] = await getPool().query(sql, [date]);
+  return r;
+}
+
+/* ----------------------------- 下钻聚合查询 ----------------------------- */
+
+async function getBreakdownTotals(filters) {
+  const { where, params } = buildBreakdownWhere(filters);
+  const sql = `
+    SELECT
+      SUM(o.qty) AS diner_count,
+      SUM(o.amount_cents) AS amount,
+      SUM(o.subsidy_cents) AS subsidy,
+      SUM(o.pay_cents) AS self_pay
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    INNER JOIN elders e ON o.elder_id = e.id
+    INNER JOIN canteens c ON m.canteen_id = c.id
+    ${where}
+  `;
+  const [r] = await getPool().query(sql, params);
+  return r;
+}
+
+async function getBreakdownByMealType(filters) {
+  const { where, params } = buildBreakdownWhere(filters);
+  const sql = `
+    SELECT m.meal_type, SUM(o.qty) AS count, SUM(o.amount_cents) AS amount
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    INNER JOIN elders e ON o.elder_id = e.id
+    INNER JOIN canteens c ON m.canteen_id = c.id
+    ${where}
+    GROUP BY m.meal_type
+  `;
+  const [r] = await getPool().query(sql, params);
+  return r;
+}
+
+async function getBreakdownByDiningType(filters) {
+  const { where, params } = buildBreakdownWhere(filters);
+  const sql = `
+    SELECT o.dining_type, SUM(o.qty) AS count, SUM(o.amount_cents) AS amount
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    INNER JOIN elders e ON o.elder_id = e.id
+    INNER JOIN canteens c ON m.canteen_id = c.id
+    ${where}
+    GROUP BY o.dining_type
+  `;
+  const [r] = await getPool().query(sql, params);
+  return r;
+}
+
+async function getBreakdownBySubsidyLevel(filters) {
+  const { where, params } = buildBreakdownWhere(filters);
+  const sql = `
+    SELECT e.subsidy_level, SUM(o.qty) AS count, SUM(o.subsidy_cents) AS amount
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    INNER JOIN elders e ON o.elder_id = e.id
+    INNER JOIN canteens c ON m.canteen_id = c.id
+    ${where}
+    GROUP BY e.subsidy_level
+  `;
+  const [r] = await getPool().query(sql, params);
+  return r;
+}
+
+async function getBreakdownByCanteen(filters) {
+  const { where, params } = buildBreakdownWhere(filters);
+  const sql = `
+    SELECT
+      m.canteen_id,
+      c.name AS canteen_name,
+      c.district,
+      SUM(o.qty) AS diner_count,
+      SUM(o.amount_cents) AS amount,
+      SUM(o.subsidy_cents) AS subsidy,
+      SUM(o.pay_cents) AS self_pay
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    INNER JOIN elders e ON o.elder_id = e.id
+    INNER JOIN canteens c ON m.canteen_id = c.id
+    ${where}
+    GROUP BY m.canteen_id, c.name, c.district
+  `;
+  const [r] = await getPool().query(sql, params);
+  return r;
+}
+
+async function getBreakdownByDistrict(filters) {
+  const { where, params } = buildBreakdownWhere(filters);
+  const sql = `
+    SELECT
+      c.district,
+      SUM(o.qty) AS diner_count,
+      SUM(o.amount_cents) AS amount,
+      SUM(o.subsidy_cents) AS subsidy,
+      SUM(o.pay_cents) AS self_pay
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    INNER JOIN elders e ON o.elder_id = e.id
+    INNER JOIN canteens c ON m.canteen_id = c.id
+    ${where}
+    GROUP BY c.district
+  `;
+  const [r] = await getPool().query(sql, params);
+  return r;
+}
+
+async function getBreakdownByTimeBucket(filters, granularity) {
+  const { where, params } = buildBreakdownWhere(filters);
+  const bucketExpr = buildTimeBucketExpr(granularity);
+  const sql = `
+    SELECT
+      ${bucketExpr} AS bucket,
+      SUM(o.qty) AS diner_count,
+      SUM(o.amount_cents) AS amount,
+      SUM(o.subsidy_cents) AS subsidy,
+      SUM(o.pay_cents) AS self_pay
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    INNER JOIN elders e ON o.elder_id = e.id
+    INNER JOIN canteens c ON m.canteen_id = c.id
+    ${where}
+    GROUP BY bucket
+    ORDER BY bucket
+  `;
+  const [r] = await getPool().query(sql, params);
+  return r;
+}
+
+function buildBreakdownWhere({ dateStart, dateEnd, district, canteenId, mealType, diningType, subsidyLevel } = {}) {
+  const w = []; const p = [];
+  w.push("o.status IN ('RESERVED','SERVED')");
+  if (dateStart) { w.push('m.serve_date >= ?'); p.push(dateStart); }
+  if (dateEnd) { w.push('m.serve_date <= ?'); p.push(dateEnd); }
+  if (district) { w.push('c.district = ?'); p.push(district); }
+  if (canteenId !== undefined) { w.push('m.canteen_id = ?'); p.push(canteenId); }
+  if (mealType) { w.push('m.meal_type = ?'); p.push(mealType); }
+  if (diningType) { w.push('o.dining_type = ?'); p.push(diningType); }
+  if (subsidyLevel) { w.push('e.subsidy_level = ?'); p.push(subsidyLevel); }
+  return { where: w.length ? `WHERE ${w.join(' AND ')}` : '', params: p };
+}
+
+/* ----------------------------- 导出数据查询 ----------------------------- */
+
+async function getOrderDetailForExport(params) {
+  const { where, params: qParams } = buildBreakdownWhere(params);
+  const sql = `
+    SELECT
+      o.id,
+      e.code AS elder_code,
+      e.name AS elder_name,
+      e.subsidy_level,
+      c.name AS canteen_name,
+      c.district,
+      m.serve_date,
+      m.meal_type,
+      m.dish_name,
+      o.dining_type,
+      o.qty,
+      o.amount_cents,
+      o.subsidy_cents,
+      o.pay_cents,
+      o.status,
+      o.created_at
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    INNER JOIN elders e ON o.elder_id = e.id
+    INNER JOIN canteens c ON m.canteen_id = c.id
+    ${where}
+    ORDER BY o.id
+  `;
+  const [r] = await getPool().query(sql, qParams);
+  return r;
+}
+
+async function getSubsidyLedgerForExport(params) {
+  const { where, params: qParams } = buildBreakdownWhere(params);
+  const sql = `
+    SELECT
+      DATE_FORMAT(m.serve_date, '%Y-%m') AS month,
+      c.district,
+      c.name AS canteen_name,
+      e.code AS elder_code,
+      e.name AS elder_name,
+      e.subsidy_level,
+      CASE
+        WHEN e.subsidy_level = 'A' THEN '低保'
+        WHEN e.age >= 80 THEN '高龄空巢'
+        ELSE '普通长者'
+      END AS identity_category,
+      SUM(o.qty) AS meal_count,
+      SUM(o.subsidy_cents) AS subsidy_total,
+      SUM(o.pay_cents) AS self_pay_total,
+      SUM(o.amount_cents) AS amount_total
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    INNER JOIN elders e ON o.elder_id = e.id
+    INNER JOIN canteens c ON m.canteen_id = c.id
+    ${where}
+    GROUP BY month, c.district, c.name, e.code, e.name, e.subsidy_level, identity_category
+    ORDER BY month, c.district, c.name, e.code
+  `;
+  const [r] = await getPool().query(sql, qParams);
+  return r;
+}
+
+async function getMealStatisticsForExport(params, granularity) {
+  const { where, params: qParams } = buildBreakdownWhere(params);
+  const bucketExpr = buildTimeBucketExpr(granularity);
+  const sql = `
+    SELECT
+      ${bucketExpr} AS bucket,
+      c.district,
+      c.name AS canteen_name,
+      m.meal_type,
+      SUM(o.qty) AS diner_count,
+      SUM(CASE WHEN o.dining_type = 'DINE_IN' THEN o.qty ELSE 0 END) AS dine_in_count,
+      SUM(CASE WHEN o.dining_type = 'DELIVERY' THEN o.qty ELSE 0 END) AS delivery_count,
+      SUM(o.subsidy_cents) AS subsidy_total,
+      SUM(o.pay_cents) AS self_pay_total,
+      SUM(o.amount_cents) AS amount_total,
+      SUM(CASE WHEN o.status = 'NO_SHOW' THEN o.qty ELSE 0 END) AS no_show_count,
+      CASE
+        WHEN SUM(o.qty) + SUM(CASE WHEN o.status = 'NO_SHOW' THEN o.qty ELSE 0 END) > 0
+        THEN SUM(CASE WHEN o.status = 'NO_SHOW' THEN o.qty ELSE 0 END) / (SUM(o.qty) + SUM(CASE WHEN o.status = 'NO_SHOW' THEN o.qty ELSE 0 END))
+        ELSE 0
+      END AS no_show_rate
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    INNER JOIN elders e ON o.elder_id = e.id
+    INNER JOIN canteens c ON m.canteen_id = c.id
+    ${where}
+    GROUP BY bucket, c.district, c.name, m.meal_type
+    ORDER BY bucket, c.district, c.name, m.meal_type
+  `;
+  const [r] = await getPool().query(sql, qParams);
+  return r;
+}
+
+async function getExportDataCount(type, params) {
+  const { where, params: qParams } = buildBreakdownWhere(params);
+  let sql;
+  switch (type) {
+    case 'SUBSIDY_LEDGER':
+      sql = `
+        SELECT COUNT(*) AS n
+        FROM (
+          SELECT 1
+          FROM orders o
+          INNER JOIN meals m ON o.meal_id = m.id
+          INNER JOIN elders e ON o.elder_id = e.id
+          INNER JOIN canteens c ON m.canteen_id = c.id
+          ${where}
+          GROUP BY DATE_FORMAT(m.serve_date, '%Y-%m'), c.district, c.name, e.code
+        ) AS sub
+      `;
+      break;
+    case 'MEAL_STATISTICS':
+      sql = `
+        SELECT COUNT(*) AS n
+        FROM (
+          SELECT 1
+          FROM orders o
+          INNER JOIN meals m ON o.meal_id = m.id
+          INNER JOIN elders e ON o.elder_id = e.id
+          INNER JOIN canteens c ON m.canteen_id = c.id
+          ${where}
+          GROUP BY ${buildTimeBucketExpr(params.granularity || 'day')}, c.district, c.name, m.meal_type
+        ) AS sub
+      `;
+      break;
+    case 'ORDER_DETAIL':
+    default:
+      sql = `
+        SELECT COUNT(*) AS n
+        FROM orders o
+        INNER JOIN meals m ON o.meal_id = m.id
+        INNER JOIN elders e ON o.elder_id = e.id
+        INNER JOIN canteens c ON m.canteen_id = c.id
+        ${where}
+      `;
+  }
+  const [r] = await getPool().query(sql, qParams);
+  return r[0] ? r[0].n : 0;
+}
+
 module.exports = {
-  mapUser, mapCanteen, mapElder, mapMeal, mapOrder,
+  mapUser, mapCanteen, mapElder, mapMeal, mapOrder, mapExportTask,
   getUserByUsername, getUserById, listUsers, createUser, updateUser, deleteUser, countUsers,
   listCanteens, getCanteenById, getCanteenByCode, createCanteen, updateCanteen, deleteCanteen,
   listElders, getElderById, getElderByCode, createElder, updateElder, deleteElder,
   listMeals, getMealById, createMeal, updateMeal, deleteMeal,
   listOrders, getOrderById, createOrder, updateOrder,
+  getExportTaskById, getExportTaskByKey, listExportTasks, createExportTask, updateExportTask, upsertExportTask,
+  getTodayDinerCountByCanteen,
+  getMealTypeDistribution,
+  getSubsidyByLevel,
+  getSubsidyByIdentity,
+  getSelfPayTotal,
+  getDiningTypeRatio,
+  getNutritionCompliance,
+  getNoShowStats,
+  getHeatmapData,
+  getBreakdownTotals,
+  getBreakdownByMealType,
+  getBreakdownByDiningType,
+  getBreakdownBySubsidyLevel,
+  getBreakdownByCanteen,
+  getBreakdownByDistrict,
+  getBreakdownByTimeBucket,
+  getOrderDetailForExport,
+  getSubsidyLedgerForExport,
+  getMealStatisticsForExport,
+  getExportDataCount,
 };

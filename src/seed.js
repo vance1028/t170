@@ -22,15 +22,29 @@ async function seed() {
   const e2 = await store.createElder({ code: 'E-0002', name: '赵建国', gender: 'M', age: 82, phone: '13800000002', subsidyLevel: 'B', dietary: '糖尿病、少糖', canteenId: c1.id });
   await store.createElder({ code: 'E-0003', name: '陈桂兰', gender: 'F', age: 69, phone: '13800000003', subsidyLevel: 'C', dietary: '', canteenId: c2.id });
 
-  const m1 = await store.createMeal({ canteenId: c1.id, serveDate: '2026-06-18', mealType: 'LUNCH', dishName: '清蒸鲈鱼套餐', priceCents: 1500, status: 'PUBLISHED' });
-  const m2 = await store.createMeal({ canteenId: c1.id, serveDate: '2026-06-18', mealType: 'DINNER', dishName: '番茄牛腩面', priceCents: 1200, status: 'PUBLISHED' });
-  await store.createMeal({ canteenId: c2.id, serveDate: '2026-06-18', mealType: 'LUNCH', dishName: '香菇鸡肉饭', priceCents: 1300, status: 'PUBLISHED' });
+  const m1 = await store.createMeal({ canteenId: c1.id, serveDate: '2026-06-18', mealType: 'LUNCH', dishName: '清蒸鲈鱼套餐', priceCents: 1500, calories: 520, proteinG: 28, carbsG: 45, fatG: 22, status: 'PUBLISHED' });
+  const m2 = await store.createMeal({ canteenId: c1.id, serveDate: '2026-06-18', mealType: 'DINNER', dishName: '番茄牛腩面', priceCents: 1200, calories: 480, proteinG: 22, carbsG: 55, fatG: 18, status: 'PUBLISHED' });
+  await store.createMeal({ canteenId: c2.id, serveDate: '2026-06-18', mealType: 'LUNCH', dishName: '香菇鸡肉饭', priceCents: 1300, calories: 450, proteinG: 25, carbsG: 50, fatG: 15, status: 'PUBLISHED' });
 
   const o1 = await store.createOrder({ elderId: e1.id, mealId: m1.id, diningType: 'DINE_IN', qty: 1, amountCents: 1500, subsidyCents: 900, payCents: 600, status: 'RESERVED' });
   await store.updateOrder(o1.id, { status: 'SERVED' });
   await store.createOrder({ elderId: e2.id, mealId: m2.id, diningType: 'DELIVERY', qty: 1, amountCents: 1200, subsidyCents: 600, payCents: 600, status: 'RESERVED' });
 
-  return { skipped: false, users: 3, canteens: 3, elders: 3, meals: 3, orders: 2 };
+  const today = '2026-06-21';
+  const tm1 = await store.createMeal({ canteenId: c1.id, serveDate: today, mealType: 'BREAKFAST', dishName: '营养早餐粥', priceCents: 600, calories: 350, proteinG: 12, carbsG: 55, fatG: 8, status: 'PUBLISHED' });
+  const tm2 = await store.createMeal({ canteenId: c1.id, serveDate: today, mealType: 'LUNCH', dishName: '红烧排骨套餐', priceCents: 1800, calories: 580, proteinG: 32, carbsG: 48, fatG: 25, status: 'PUBLISHED' });
+  const tm3 = await store.createMeal({ canteenId: c1.id, serveDate: today, mealType: 'DINNER', dishName: '小米粥配包子', priceCents: 800, calories: 420, proteinG: 14, carbsG: 60, fatG: 12, status: 'PUBLISHED' });
+  const tm4 = await store.createMeal({ canteenId: c2.id, serveDate: today, mealType: 'LUNCH', dishName: '清蒸鳕鱼套餐', priceCents: 1600, calories: 500, proteinG: 30, carbsG: 42, fatG: 18, status: 'PUBLISHED' });
+
+  const to1 = await store.createOrder({ elderId: e1.id, mealId: tm1.id, diningType: 'DINE_IN', qty: 1, amountCents: 600, subsidyCents: 360, payCents: 240, status: 'RESERVED' });
+  await store.updateOrder(to1.id, { status: 'SERVED' });
+  const to2 = await store.createOrder({ elderId: e1.id, mealId: tm2.id, diningType: 'DINE_IN', qty: 1, amountCents: 1800, subsidyCents: 1080, payCents: 720, status: 'RESERVED' });
+  await store.updateOrder(to2.id, { status: 'SERVED' });
+  const to3 = await store.createOrder({ elderId: e2.id, mealId: tm2.id, diningType: 'DELIVERY', qty: 1, amountCents: 1800, subsidyCents: 900, payCents: 900, status: 'RESERVED' });
+  await store.updateOrder(to3.id, { status: 'SERVED' });
+  const to4 = await store.createOrder({ elderId: e2.id, mealId: tm3.id, diningType: 'DELIVERY', qty: 1, amountCents: 800, subsidyCents: 400, payCents: 400, status: 'NO_SHOW' });
+
+  return { skipped: false, users: 3, canteens: 3, elders: 3, meals: 7, orders: 6 };
 }
 
 if (require.main === module) {
