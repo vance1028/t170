@@ -13,7 +13,21 @@ router.use(authRequired);
 
 const EXPORT_TYPES = ['SUBSIDY_LEDGER', 'ORDER_DETAIL', 'MEAL_STATISTICS'];
 
+const BATCH_SIZE = 1000;
+
 const runningTasks = new Set();
+
+async function fetchBatch(type, params, limit, offset) {
+  switch (type) {
+    case 'SUBSIDY_LEDGER':
+      return store.getSubsidyLedgerForExportBatch(params, limit, offset);
+    case 'MEAL_STATISTICS':
+      return store.getMealStatisticsForExportBatch(params, params.granularity || 'day', limit, offset);
+    case 'ORDER_DETAIL':
+    default:
+      return store.getOrderDetailForExportBatch(params, limit, offset);
+  }
+}
 
 async function processExportTask(taskId) {
   if (runningTasks.has(taskId)) return;
@@ -37,33 +51,43 @@ async function processExportTask(taskId) {
     const totalCount = await store.getExportDataCount(task.type, params);
     await store.updateExportTask(taskId, { totalCount, processedCount: 0 });
 
-    let rawRows;
-    switch (task.type) {
-      case 'SUBSIDY_LEDGER':
-        rawRows = await store.getSubsidyLedgerForExport(params);
-        break;
-      case 'MEAL_STATISTICS':
-        rawRows = await store.getMealStatisticsForExport(params, params.granularity || 'day');
-        break;
-      case 'ORDER_DETAIL':
-      default:
-        rawRows = await store.getOrderDetailForExport(params);
-    }
-
     const fileName = exporter.generateFileName(task.type, params);
     const filePath = exporter.getExportFilePath(fileName);
     exporter.ensureExportDir();
 
-    const mappedRows = rawRows.map(config.rowMapper);
-    const csvContent = exporter.toCsv(config.headers, mappedRows);
+    const writeStream = fs.createWriteStream(filePath, { encoding: 'utf8' });
+    writeStream.write('\uFEFF');
+    writeStream.write(config.headers.map(exporter.escapeCsvField).join(',') + '\n');
 
-    await store.updateExportTask(taskId, { processedCount: Math.floor(rawRows.length * 0.5) });
+    let offset = 0;
+    let processed = 0;
 
-    fs.writeFileSync(filePath, csvContent, 'utf8');
+    while (offset < totalCount || totalCount === 0) {
+      const batch = await fetchBatch(task.type, params, BATCH_SIZE, offset);
+      if (batch.length === 0) break;
+
+      for (const row of batch) {
+        const mapped = config.rowMapper(row);
+        writeStream.write(config.headers.map(h => exporter.escapeCsvField(mapped[h])).join(',') + '\n');
+        processed++;
+      }
+
+      offset += batch.length;
+      await store.updateExportTask(taskId, { processedCount: processed });
+
+      if (batch.length < BATCH_SIZE) break;
+    }
+
+    await new Promise((resolve, reject) => {
+      writeStream.end(err => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
 
     await store.updateExportTask(taskId, {
       status: 'COMPLETED',
-      processedCount: rawRows.length,
+      processedCount: processed,
       filePath,
       fileName,
     });
@@ -226,9 +250,15 @@ async function startPendingTasks() {
   }
 }
 
-setInterval(startPendingTasks, 30000);
+const pollInterval = setInterval(startPendingTasks, 30000);
+if (pollInterval.unref) pollInterval.unref();
+
+function closeExportScheduler() {
+  clearInterval(pollInterval);
+}
 
 module.exports = {
   router,
   processExportTask,
+  closeExportScheduler,
 };

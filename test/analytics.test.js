@@ -12,12 +12,16 @@ const { seed } = require('../src/seed');
 const { createApp } = require('../src/app');
 const { buildEmptyOverview, buildEmptyBreakdown, aggregateOverview, zeroOrNum } = require('../src/data/aggregator');
 const { escapeCsvField, toCsv } = require('../src/data/exporter');
+const { closeExportScheduler } = require('../src/routes/exports');
 
 const app = createApp();
 
 test.before(async () => { await waitForDb(); await ensureSchema(); getPool(); });
 test.beforeEach(async () => { await resetAll(); await seed(); });
-test.after(async () => { await close(); });
+test.after(async () => {
+  closeExportScheduler();
+  await close();
+});
 
 async function loginAs(u, p) {
   const res = await request(app).post('/api/auth/login').send({ username: u, password: p });
@@ -309,4 +313,89 @@ test('总览接口结构与明细金额一致', async () => {
   assert.strictEqual(d.nutritionTotal, 3);
   assert.strictEqual(d.nutritionCompliant, 2);
   assert.ok(d.nutritionComplianceRate > 0.66 && d.nutritionComplianceRate < 0.67);
+});
+
+test('导出任务：进度从 0 开始，完成时 processedCount 等于 totalCount', async () => {
+  const token = await loginAs('operator', 'operator123');
+  const store = require('../src/data/store');
+
+  const body = {
+    type: 'ORDER_DETAIL',
+    dateStart: '2026-06-01',
+    dateEnd: '2026-06-30',
+  };
+
+  const submitRes = await request(app).post('/api/exports').set('Authorization', `Bearer ${token}`).send(body);
+  assert.strictEqual(submitRes.status, 201);
+  const taskId = submitRes.body.data.taskId;
+
+  const initial = await store.getExportTaskById(taskId);
+  assert.ok(initial);
+  assert.strictEqual(initial.processedCount, 0, '初始时 processedCount 应为 0');
+
+  await new Promise(r => setTimeout(r, 1500));
+
+  const final = await store.getExportTaskById(taskId);
+  assert.strictEqual(final.status, 'COMPLETED', '任务最终应为 COMPLETED');
+  assert.strictEqual(final.processedCount, final.totalCount, '完成时 processedCount 应等于 totalCount');
+  assert.ok(final.totalCount > 0, 'totalCount 应大于 0');
+  assert.ok(final.filePath, '应有文件路径');
+  assert.ok(fs.existsSync(final.filePath), '导出文件应存在');
+});
+
+test('导出任务：同参数重复提交返回相同任务号且 reused=true', async () => {
+  const token = await loginAs('operator', 'operator123');
+
+  const body = {
+    type: 'SUBSIDY_LEDGER',
+    dateStart: '2026-06-01',
+    dateEnd: '2026-06-30',
+    district: '城关区',
+  };
+
+  const res1 = await request(app).post('/api/exports').set('Authorization', `Bearer ${token}`).send(body);
+  assert.strictEqual(res1.status, 201);
+  assert.strictEqual(res1.body.data.reused, false);
+  const taskId1 = res1.body.data.taskId;
+
+  await new Promise(r => setTimeout(r, 200));
+
+  const res2 = await request(app).post('/api/exports').set('Authorization', `Bearer ${token}`).send(body);
+  assert.strictEqual(res2.status, 200);
+  assert.strictEqual(res2.body.data.reused, true);
+  assert.strictEqual(res2.body.data.taskId, taskId1, '同参数应复用同一任务');
+
+  await new Promise(r => setTimeout(r, 200));
+
+  const res3 = await request(app).post('/api/exports').set('Authorization', `Bearer ${token}`).send(body);
+  assert.strictEqual(res3.body.data.reused, true, '第三次提交也应复用');
+  assert.strictEqual(res3.body.data.taskId, taskId1);
+});
+
+test('导出任务：不同参数创建不同任务，不复用', async () => {
+  const token = await loginAs('operator', 'operator123');
+
+  const body1 = {
+    type: 'ORDER_DETAIL',
+    dateStart: '2026-06-01',
+    dateEnd: '2026-06-15',
+  };
+  const body2 = {
+    type: 'ORDER_DETAIL',
+    dateStart: '2026-06-16',
+    dateEnd: '2026-06-30',
+  };
+
+  const res1 = await request(app).post('/api/exports').set('Authorization', `Bearer ${token}`).send(body1);
+  const res2 = await request(app).post('/api/exports').set('Authorization', `Bearer ${token}`).send(body2);
+
+  assert.strictEqual(res1.status, 201);
+  assert.strictEqual(res2.status, 201);
+  assert.notStrictEqual(res1.body.data.taskId, res2.body.data.taskId, '不同参数应创建不同任务');
+  assert.strictEqual(res1.body.data.reused, false);
+  assert.strictEqual(res2.body.data.reused, false);
+});
+
+test('closeExportScheduler 是可调用的函数', () => {
+  assert.strictEqual(typeof closeExportScheduler, 'function');
 });

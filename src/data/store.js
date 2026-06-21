@@ -585,6 +585,104 @@ async function getMealStatisticsForExport(params, granularity) {
   return r;
 }
 
+async function getOrderDetailForExportBatch(params, limit, offset) {
+  const { where, params: qParams } = buildBreakdownWhere(params);
+  const sql = `
+    SELECT
+      o.id,
+      e.code AS elder_code,
+      e.name AS elder_name,
+      e.subsidy_level,
+      c.name AS canteen_name,
+      c.district,
+      m.serve_date,
+      m.meal_type,
+      m.dish_name,
+      o.dining_type,
+      o.qty,
+      o.amount_cents,
+      o.subsidy_cents,
+      o.pay_cents,
+      o.status,
+      o.created_at
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    INNER JOIN elders e ON o.elder_id = e.id
+    INNER JOIN canteens c ON m.canteen_id = c.id
+    ${where}
+    ORDER BY o.id
+    LIMIT ? OFFSET ?
+  `;
+  const [r] = await getPool().query(sql, [...qParams, Number(limit), Number(offset)]);
+  return r;
+}
+
+async function getSubsidyLedgerForExportBatch(params, limit, offset) {
+  const { where, params: qParams } = buildBreakdownWhere(params);
+  const sql = `
+    SELECT
+      DATE_FORMAT(m.serve_date, '%Y-%m') AS month,
+      c.district,
+      c.name AS canteen_name,
+      e.code AS elder_code,
+      e.name AS elder_name,
+      e.subsidy_level,
+      CASE
+        WHEN e.subsidy_level = 'A' THEN '低保'
+        WHEN e.age >= 80 THEN '高龄空巢'
+        ELSE '普通长者'
+      END AS identity_category,
+      SUM(o.qty) AS meal_count,
+      SUM(o.subsidy_cents) AS subsidy_total,
+      SUM(o.pay_cents) AS self_pay_total,
+      SUM(o.amount_cents) AS amount_total
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    INNER JOIN elders e ON o.elder_id = e.id
+    INNER JOIN canteens c ON m.canteen_id = c.id
+    ${where}
+    GROUP BY month, c.district, c.name, e.code, e.name, e.subsidy_level, identity_category
+    ORDER BY month, c.district, c.name, e.code
+    LIMIT ? OFFSET ?
+  `;
+  const [r] = await getPool().query(sql, [...qParams, Number(limit), Number(offset)]);
+  return r;
+}
+
+async function getMealStatisticsForExportBatch(params, granularity, limit, offset) {
+  const { where, params: qParams } = buildBreakdownWhere(params);
+  const bucketExpr = buildTimeBucketExpr(granularity);
+  const sql = `
+    SELECT
+      ${bucketExpr} AS bucket,
+      c.district,
+      c.name AS canteen_name,
+      m.meal_type,
+      SUM(o.qty) AS diner_count,
+      SUM(CASE WHEN o.dining_type = 'DINE_IN' THEN o.qty ELSE 0 END) AS dine_in_count,
+      SUM(CASE WHEN o.dining_type = 'DELIVERY' THEN o.qty ELSE 0 END) AS delivery_count,
+      SUM(o.subsidy_cents) AS subsidy_total,
+      SUM(o.pay_cents) AS self_pay_total,
+      SUM(o.amount_cents) AS amount_total,
+      SUM(CASE WHEN o.status = 'NO_SHOW' THEN o.qty ELSE 0 END) AS no_show_count,
+      CASE
+        WHEN SUM(o.qty) + SUM(CASE WHEN o.status = 'NO_SHOW' THEN o.qty ELSE 0 END) > 0
+        THEN SUM(CASE WHEN o.status = 'NO_SHOW' THEN o.qty ELSE 0 END) / (SUM(o.qty) + SUM(CASE WHEN o.status = 'NO_SHOW' THEN o.qty ELSE 0 END))
+        ELSE 0
+      END AS no_show_rate
+    FROM orders o
+    INNER JOIN meals m ON o.meal_id = m.id
+    INNER JOIN elders e ON o.elder_id = e.id
+    INNER JOIN canteens c ON m.canteen_id = c.id
+    ${where}
+    GROUP BY bucket, c.district, c.name, m.meal_type
+    ORDER BY bucket, c.district, c.name, m.meal_type
+    LIMIT ? OFFSET ?
+  `;
+  const [r] = await getPool().query(sql, [...qParams, Number(limit), Number(offset)]);
+  return r;
+}
+
 async function getExportDataCount(type, params) {
   const { where, params: qParams } = buildBreakdownWhere(params);
   let sql;
@@ -659,5 +757,8 @@ module.exports = {
   getOrderDetailForExport,
   getSubsidyLedgerForExport,
   getMealStatisticsForExport,
+  getOrderDetailForExportBatch,
+  getSubsidyLedgerForExportBatch,
+  getMealStatisticsForExportBatch,
   getExportDataCount,
 };
